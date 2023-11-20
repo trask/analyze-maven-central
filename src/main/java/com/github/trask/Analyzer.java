@@ -8,6 +8,7 @@ import java.net.http.HttpResponse;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.sql.SQLException;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.jar.JarFile;
 import java.util.jar.Manifest;
 import java.util.regex.Pattern;
@@ -15,8 +16,6 @@ import java.util.zip.ZipException;
 
 // percentage of artifacts which had at least one version published in October 2023
 public class Analyzer {
-
-    private static final int NUM_LEVELS = 2;
 
     private static final String MAVEN_CENTRAL_ROOT = "https://repo1.maven.org/maven2/";
 
@@ -29,18 +28,19 @@ public class Analyzer {
     }
 
     public static void main(String[] args) throws Exception {
-        new Analyzer().analyzePath("", 0);
+        new Analyzer().analyzePath("", 0, new AtomicInteger());
     }
 
-    private Result analyzePath(String path, int level) throws Exception {
+    private void analyzePath(String path, int level, AtomicInteger numArtifactsAnalyzedInParentGroupId) throws Exception {
         String page;
         try {
             page = httpClient.get(MAVEN_CENTRAL_ROOT + path);
         } catch (Exception e) {
-            return null;
+            return;
         }
 
-        var found = false;
+        AtomicInteger numArtifactsAnalyzedInThisGroupId = new AtomicInteger();
+
         var matcher = HREFS.matcher(page);
         while (matcher.find()) {
             var href = matcher.group(1);
@@ -52,24 +52,18 @@ public class Analyzer {
                 continue;
             }
             var date = matcher.group(2);
-            Result result = null;
             if (date.equals("-")) {
-                result = analyzePath(path + href, level + 1);
-            } else if (date.startsWith("2023-10-") && level > 0) {
-                result = analyzeArtifact(path + href);
-            }
-            found = found || result != null;
-            if (result != null && level >= NUM_LEVELS) {
-                break;
+                analyzePath(path + href, level + 1, numArtifactsAnalyzedInThisGroupId);
+            } else if (numArtifactsAnalyzedInParentGroupId.get() < 5 && date.startsWith("2023-10-") && level > 0) {
+                Result result = analyzeArtifact(path + href);
+                if (result != null) {
+                    numArtifactsAnalyzedInParentGroupId.getAndIncrement();
+                }
             }
         }
-        if (level > NUM_LEVELS) {
-            return Result.UNSIGNED;
-        }
-        if (level == NUM_LEVELS && found) {
+        if (numArtifactsAnalyzedInThisGroupId.get() > 0) {
             System.out.println(path);
         }
-        return null;
     }
 
     private Result analyzeArtifact(String path) throws Exception {
@@ -122,14 +116,6 @@ public class Analyzer {
                         .method("GET", HttpRequest.BodyPublishers.noBody())
                         .build();
         jarHttpClient.send(request, HttpResponse.BodyHandlers.ofFile(localJar));
-    }
-
-    private static String getPrefix(String path) {
-        int index = -1;
-        for (int i = 0; i < NUM_LEVELS; i++) {
-            index = path.indexOf('/', index + 1);
-        }
-        return path.substring(0, index);
     }
 
     private enum Result {
